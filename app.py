@@ -1,19 +1,38 @@
 from flask import Flask, request, jsonify
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import WebshareProxyConfig
 import os
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from dotenv import load_dotenv
+from urllib.parse import urlparse
 
 load_dotenv()
 
 app = Flask(__name__)
 
-# Initialize YouTube API client only when needed
 def get_youtube_client():
     return build('youtube', 'v3', developerKey=os.getenv('YOUTUBE_API_KEY'))
 
-PROXY_URL = os.getenv('PROXY_URL')
+def get_proxy_config():
+    proxy_url = os.getenv('PROXY_URL')
+    if not proxy_url:
+        return None
+        
+    try:
+        # Parse proxy URL to extract username and password
+        parsed = urlparse(proxy_url)
+        if not parsed.username or not parsed.password:
+            print('Warning: Proxy URL does not contain credentials')
+            return None
+            
+        return WebshareProxyConfig(
+            proxy_username=parsed.username,
+            proxy_password=parsed.password
+        )
+    except Exception as e:
+        print(f'Error configuring proxy: {str(e)}')
+        return None
 
 @app.route('/')
 def home():
@@ -60,6 +79,14 @@ def get_transcript(video_id):
         except HttpError as e:
             print("Error checking video existence:", str(e))
 
+        # Configure proxy
+        proxy_config = get_proxy_config()
+        if not proxy_config:
+            print('Warning: No proxy configuration available, proceeding without proxy')
+
+        # Initialize YouTubeTranscriptApi with proxy config
+        ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+
         # Fetch transcript
         print(f'Attempting to fetch transcript for video {video_id}...')
         transcript_list = None
@@ -67,11 +94,7 @@ def get_transcript(video_id):
 
         try:
             print('Trying to fetch English transcript...')
-            transcript_list = YouTubeTranscriptApi.get_transcript(
-                video_id,
-                languages=['en'],
-                proxies={'http': PROXY_URL} if PROXY_URL else None
-            )
+            transcript_list = ytt_api.get_transcript(video_id, languages=['en'])
             print('Successfully fetched English transcript')
         except Exception as e:
             transcript_error = str(e)
@@ -79,10 +102,7 @@ def get_transcript(video_id):
 
             try:
                 print('Trying to fetch transcript in any language...')
-                transcript_list = YouTubeTranscriptApi.get_transcript(
-                    video_id,
-                    proxies={'http': PROXY_URL} if PROXY_URL else None
-                )
+                transcript_list = ytt_api.get_transcript(video_id)
                 print('Successfully fetched transcript in non-English language')
             except Exception as fallback_err:
                 print('Failed to fetch transcript in any language:', str(fallback_err))
@@ -153,7 +173,5 @@ def get_transcript(video_id):
             'status': False
         }), 500
 
-# Remove the app.run() call as Vercel will handle this
 if __name__ == '__main__':
-    # Only run the development server if we're running locally
     app.run(debug=True)
