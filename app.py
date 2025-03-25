@@ -1,11 +1,11 @@
 from flask import Flask, request, jsonify
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.proxies import WebshareProxyConfig
+from youtube_transcript_api.proxies import GenericProxyConfig
 import os
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from dotenv import load_dotenv
-from urllib.parse import urlparse
+import urllib.parse
 
 load_dotenv()
 
@@ -14,25 +14,35 @@ app = Flask(__name__)
 def get_youtube_client():
     return build('youtube', 'v3', developerKey=os.getenv('YOUTUBE_API_KEY'))
 
-def get_proxy_config():
-    proxy_url = os.getenv('PROXY_URL')
-    if not proxy_url:
-        return None
-        
-    try:
-        # Parse proxy URL to extract username and password
-        parsed = urlparse(proxy_url)
-        if not parsed.username or not parsed.password:
-            print('Warning: Proxy URL does not contain credentials')
-            return None
-            
-        return WebshareProxyConfig(
-            proxy_username=parsed.username,
-            proxy_password=parsed.password
+def get_proxied_transcript_api():
+    """Get a YouTubeTranscriptApi instance configured with proxy settings from .env"""
+    # Parse the proxy string in format "IP:Port:Username:Password"
+    proxy_string = "23.106.53.93:80:otntczny-1:1w8maa9o5q5r"
+    parts = proxy_string.split(":")
+    
+    if len(parts) >= 4:
+        proxy_host = parts[0]
+        proxy_port = parts[1]
+        username = urllib.parse.quote(parts[2])
+        password = urllib.parse.quote(parts[3])
+    else:
+        proxy_host = "23.106.53.93"
+        proxy_port = "80"
+        username = urllib.parse.quote(os.getenv('PROXY_USERNAME', ''))
+        password = urllib.parse.quote(os.getenv('PROXY_PASSWORD', ''))
+    
+    auth_part = f"{username}:{password}@" if username and password else ""
+
+    proxy_url = f"http://{auth_part}{proxy_host}:{proxy_port}"
+    https_url = f"https://{auth_part}{proxy_host}:{proxy_port}"
+
+    print(f"Configuring proxy: {proxy_host}:{proxy_port} with auth")
+    return YouTubeTranscriptApi(
+        proxy_config=GenericProxyConfig(
+            http_url=proxy_url,
+            https_url=https_url
         )
-    except Exception as e:
-        print(f'Error configuring proxy: {str(e)}')
-        return None
+    )
 
 @app.route('/')
 def home():
@@ -79,22 +89,20 @@ def get_transcript(video_id):
         except HttpError as e:
             print("Error checking video existence:", str(e))
 
-        # Configure proxy
-        proxy_config = get_proxy_config()
-        if not proxy_config:
-            print('Warning: No proxy configuration available, proceeding without proxy')
-
-        # Initialize YouTubeTranscriptApi with proxy config
-        ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
-
-        # Fetch transcript
-        print(f'Attempting to fetch transcript for video {video_id}...')
+        # Fetch transcript with proxy
+        print(f'Attempting to fetch transcript for video {video_id} using proxy...')
         transcript_list = None
         transcript_error = None
+        
+        # Get proxied transcript API instance
+        proxied_api = get_proxied_transcript_api()
 
         try:
             print('Trying to fetch English transcript...')
-            transcript_list = ytt_api.get_transcript(video_id, languages=['en'])
+            transcript_list = proxied_api.get_transcript(
+                video_id, 
+                languages=['en']
+            )
             print('Successfully fetched English transcript')
         except Exception as e:
             transcript_error = str(e)
@@ -102,7 +110,7 @@ def get_transcript(video_id):
 
             try:
                 print('Trying to fetch transcript in any language...')
-                transcript_list = ytt_api.get_transcript(video_id)
+                transcript_list = proxied_api.get_transcript(video_id)
                 print('Successfully fetched transcript in non-English language')
             except Exception as fallback_err:
                 print('Failed to fetch transcript in any language:', str(fallback_err))
@@ -174,4 +182,7 @@ def get_transcript(video_id):
         }), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.getenv('FLASK_PORT', 5001))  
+    host = os.getenv('FLASK_HOST', '127.0.0.1')  
+    print(f"Starting server on {host}:{port}")
+    app.run(debug=True, host=host, port=port, use_reloader=False)  # Disable auto-reloader to avoid watchdog errors
